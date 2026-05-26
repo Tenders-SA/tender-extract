@@ -1,0 +1,17 @@
+# Render.com deployment configuration
+# https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: tender-extract
+    runtime: python
+    plan: free
+    region: frankfurt  # EU region
+    rootDir: pdf-processor/tender-extract
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13"
+    healthCheckPath: /health
+    autoDeploy: true

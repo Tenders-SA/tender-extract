@@ -1,0 +1,27 @@
+# Tender Extract API - Python Dependencies
+# Python 3.12 compatible, optimized for Cloud Run
+
+# Core web framework
+fastapi>=0.115.0
+pydantic>=2.5.0
+
+# PDF processing (PyMuPDF for 5-10x faster extraction)
+PyMuPDF>=1.24.0
+
+# HTTP client for URL fetching
+httpx>=0.27.0
+
+# ASGI server
+gunicorn>=21.0.0
+uvicorn[standard]>=0.30.0
+
+# File upload support
+python-multipart>=0.0.9
+
+# Optional: For monitoring worker crashes (used in gunicorn.conf.py)
+psutil>=5.9.0
+
+# Development dependencies (install with: pip install -r requirements.txt)
+# mypy>=1.13.0
+# pytest>=8.0.0
+# pytest-asyncio>=0.24.0
