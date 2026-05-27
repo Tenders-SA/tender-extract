@@ -38,6 +38,24 @@ class BBBEEInfo(BaseModel):
     minimum_level: Optional[str] = Field(default=None, description="Minimum B-BBEE level required")
     points_allocation: Optional[str] = Field(default=None, description="Points allocated for B-BBEE")
     details: Optional[str] = Field(default=None, description="Full B-BBEE requirements text")
+    local_content_requirement: Optional[str] = Field(default=None, description="Local content minimum percentage requirement")
+    hdi_requirement: Optional[str] = Field(default=None, description="HDI sub-contracting obligation")
+
+
+class EvaluationSubCriterion(BaseModel):
+    """A single evaluation sub-criterion with its point weight."""
+
+    criterion: str = Field(..., description="Name of the evaluation criterion")
+    weight: int = Field(..., description="Point weight assigned to this criterion")
+
+
+class EvaluationCriteria(BaseModel):
+    """Structured evaluation criteria with system type and sub-criteria."""
+
+    system: Optional[str] = Field(default=None, description="Preference point system (80/20 or 90/10)")
+    functionality_threshold: Optional[str] = Field(default=None, description="Minimum functionality/qualifying score")
+    sub_criteria: list[EvaluationSubCriterion] = Field(default_factory=list, description="Named sub-criteria with point weights")
+    details: Optional[str] = Field(default=None, description="Full evaluation criteria text")
 
 
 class ExtractResponse(BaseModel):
@@ -148,6 +166,28 @@ class ExtractResponse(BaseModel):
     returnable_documents: list[str] = Field(
         default_factory=list,
         description="List of documents to be submitted with bid"
+    )
+    
+    # NEW: Phase 1 extraction enhancements
+    document_type: str = Field(
+        default="unknown",
+        description="Document type classification: RFQ, TENDER, EOI, RFP, or unknown"
+    )
+    province: Optional[str] = Field(
+        default=None,
+        description="Province extracted from document text"
+    )
+    contract_type: Optional[str] = Field(
+        default=None,
+        description="Contract framework type: NEC3, JBCC, GCC2010, GCC2015, FIDIC, etc."
+    )
+    procurement_threshold: Optional[str] = Field(
+        default=None,
+        description="Procurement threshold classification label"
+    )
+    evaluation_structured: Optional[EvaluationCriteria] = Field(
+        default=None,
+        description="Structured evaluation criteria with sub-criteria and weightings"
     )
     
     # Metadata

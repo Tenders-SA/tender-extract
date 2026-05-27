@@ -35,6 +35,8 @@ from .schemas import (
     ContactInfo,
     BriefingSession,
     BBBEEInfo,
+    EvaluationSubCriterion,
+    EvaluationCriteria,
 )
 
 # Configuration
@@ -301,6 +303,24 @@ async def extract_tender(
             minimum_level=result.bbbee.minimum_level,
             points_allocation=result.bbbee.points_allocation,
             details=result.bbbee.details,
+            local_content_requirement=result.bbbee.local_content_requirement,
+            hdi_requirement=result.bbbee.hdi_requirement,
+        )
+
+    eval_structured = None
+    if result.evaluation_structured:
+        sub_criteria = [
+            EvaluationSubCriterion(
+                criterion=s.criterion,
+                weight=s.weight,
+            )
+            for s in result.evaluation_structured.sub_criteria
+        ]
+        eval_structured = EvaluationCriteria(
+            system=result.evaluation_structured.system,
+            functionality_threshold=result.evaluation_structured.functionality_threshold,
+            sub_criteria=sub_criteria,
+            details=result.evaluation_structured.details,
         )
 
     return ExtractResponse(
@@ -326,6 +346,11 @@ async def extract_tender(
         evaluation_criteria=result.evaluation_criteria,
         special_conditions=result.special_conditions,
         returnable_documents=result.returnable_documents,
+        document_type=result.document_type,
+        province=result.province,
+        contract_type=result.contract_type,
+        procurement_threshold=result.procurement_threshold,
+        evaluation_structured=eval_structured,
         confidence=result.confidence,
         pages_used=result.pages_used,
         raw_text_preview=result.raw_text_preview,

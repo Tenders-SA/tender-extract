@@ -21,12 +21,37 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Optional
 
-import fitz  # PyMuPDF
+import fitz  # PyMuPDF  # type: ignore[import-not-found]
 
 
 class UnsearchablePDF(Exception):
     """Raised when a PDF has too little searchable text."""
     pass
+
+
+class DocType:
+    """Document type classification constants."""
+    RFQ = "RFQ"
+    TENDER = "TENDER"
+    EOI = "EOI"
+    RFP = "RFP"
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class EvaluationSubCriterion:
+    """A single evaluation sub-criterion with point weight."""
+    criterion: str = ""
+    weight: int = 0
+
+
+@dataclass
+class EvaluationCriteria:
+    """Structured evaluation criteria."""
+    system: Optional[str] = None
+    functionality_threshold: Optional[str] = None
+    sub_criteria: list[EvaluationSubCriterion] = field(default_factory=list)
+    details: Optional[str] = None
 
 
 @dataclass
@@ -57,6 +82,8 @@ class BBBEEInfo:
     minimum_level: Optional[str] = None
     points_allocation: Optional[str] = None
     details: Optional[str] = None
+    local_content_requirement: Optional[str] = None
+    hdi_requirement: Optional[str] = None
 
     # These are useful internally. They are not returned by main.py unless you
     # also update schemas.py and main.py to expose them.
@@ -98,6 +125,13 @@ class ExtractionResult:
     special_conditions: Optional[str] = None
     returnable_documents: list[str] = field(default_factory=list)
 
+    # NEW: Phase 1 extraction enhancements
+    document_type: str = DocType.UNKNOWN
+    province: Optional[str] = None
+    contract_type: Optional[str] = None
+    procurement_threshold: Optional[str] = None
+    evaluation_structured: Optional[EvaluationCriteria] = None
+
     confidence: float = 0.0
     pages_used: list[int] = field(default_factory=list)
     raw_text_preview: Optional[str] = None
@@ -108,7 +142,11 @@ class ExtractionResult:
 
     @property
     def needs_ai_fallback(self) -> bool:
-        """True if deterministic extraction is weak enough to justify AI fallback."""
+        """True if deterministic extraction is weak enough to justify AI fallback.
+
+        Document-type-aware threshold: RFQs naturally have less structured content
+        so they use a lower confidence threshold (0.40) vs standard (0.55).
+        """
 
         generic_requirements = (
             not self.requirements
@@ -116,8 +154,10 @@ class ExtractionResult:
             or self.requirements == ["Insufficient searchable text - AI extraction recommended"]
         )
 
+        threshold = 0.40 if self.document_type == DocType.RFQ else 0.55
+
         return (
-            self.confidence < 0.55
+            self.confidence < threshold
             or not self.tender_number
             or not self.closing_date
             or not self.title
@@ -236,7 +276,18 @@ class TenderExtractor:
         r"^\s*([A-Z][A-Z\s.'’&()/,-]{3,}?"
         r"(?:MUNICIPALITY|DEPARTMENT|ENTITY|BOARD|AGENCY|COLLEGE|UNIVERSITY|"
         r"HOSPITAL|WATER|ESKOM|TRANSNET|SANRAL|AUTHORITY|COMMISSION|COUNCIL|"
-        r"DISTRICT|METRO|METROPOLITAN))\s*$",
+        r"DISTRICT|METRO|METROPOLITAN|MUNICIPAL|PARASTATAL|"
+        r"INFRASTRUCTURE|DEVELOPMENT|TRANSPORT|PUBLIC\s+WORKS|"
+        r"WATER\s+&?\s+SANITATION|SOCIAL\s+DEVELOPMENT|"
+        r"EDUCATION|HEALTH|AGRICULTURE|"
+        r"HUMAN\s+SETTLEMENTS|COOPERATIVE\s+GOVERNANCE|"
+        r"TRADITIONAL\s+AFFAIRS|CORRECTIONAL\s+SERVICE|"
+        r"POLICE\s+SERVICE|DEFENCE|MINERAL\s+RESOURCES|"
+        r"ENERGY|SPORT|ARTS\s+AND\s+CULTURE|"
+        r"ENVIRONMENTAL\s+AFFAIRS|TOURISM|"
+        r"SCIENCE\s+AND\s+TECHNOLOGY|"
+        r"SMALL\s+BUSINESS\s+DEVELOPMENT|"
+        r"WOMEN|YOUTH|DISABLED))\s*$",
         re.MULTILINE,
     )
 
@@ -247,8 +298,8 @@ class TenderExtractor:
     )
 
     TENDER_NUMBER_ALT_PATTERN = re.compile(
-        r"\b([A-Z0-9]{1,10}[/-]\d{1,6}\s*[-–—]?\s*"
-        r"(?:T|RFQ|RFP|BID|SCM|COR|REQ)[A-Z0-9/.\-–—]+)\b",
+        r"\b((?:SCM|PMU|WKC|MFMU|NMBM|RBDM|SALGA|COR|REQ|BID|T|RFQ|RFP|"
+        r"GPM|DORA|DPW|DoD|DoH|DoE|SANTACO)[A-Z0-9/.\-–—]{2,60})\b",
         re.IGNORECASE,
     )
 
@@ -344,6 +395,170 @@ class TenderExtractor:
         r"minimum\s+threshold\s+of)\s*(\d{1,3}\s*%?|\d{1,3}\s+points?)",
         re.IGNORECASE,
     )
+
+    # NEW: Phase 1 patterns
+    # -------------------------------------------------------------------------
+
+    SA_PROVINCES = [
+        "eastern cape", "western cape", "northern cape",
+        "free state", "kwa-zulu natal", "kwa zulu natal",
+        "kwazulu-natal", "kwazulu natal", "kzn",
+        "gauteng", "north west", "limpopo", "mpumalanga",
+    ]
+
+    PROVINCE_PATTERN = re.compile(
+        r"(?:" + "|".join(
+            re.escape(p) for p in [
+                "Eastern Cape", "Western Cape", "Northern Cape",
+                "Free State", "Gauteng", "North West",
+                "Mpumalanga", "Limpopo",
+                "KwaZulu-Natal", "Kwa-Zulu Natal", "Kwa Zulu Natal",
+                "Kwazulu-Natal", "Kwazulu Natal", "KZN",
+            ]
+        ) + r")",
+        re.IGNORECASE,
+    )
+
+    DOC_TYPE_PATTERNS: dict[str, re.Pattern] = {
+        DocType.RFQ: re.compile(
+            r"\b(?:request\s+for\s+quot(?:ation|e?s?)|rfq\b|quote\s+number|quotations?\s+(?:are\s+)?invited)",
+            re.IGNORECASE,
+        ),
+        DocType.EOI: re.compile(
+            r"\b(?:expression\s+of\s+interest|eoi\b|call\s+for\s+expression)",
+            re.IGNORECASE,
+        ),
+        DocType.RFP: re.compile(
+            r"\b(?:request\s+for\s+proposal|rfp\b)",
+            re.IGNORECASE,
+        ),
+        DocType.TENDER: re.compile(
+            r"\b(?:invitation\s+to\s+(?:bid|tender)|tender\s+(?:number|notice|document)|"
+            r"bid\s+(?:number|notice|document)|scm\s*[/-]\d|"
+            r"sbd\s+\d|mbd\s+\d)",
+            re.IGNORECASE,
+        ),
+    }
+
+    PART_T1_PATTERN = re.compile(
+        r"\bPART\s+T1\b",
+        re.IGNORECASE,
+    )
+
+    PART_T2_PATTERN = re.compile(
+        r"\bPART\s+T2\b",
+        re.IGNORECASE,
+    )
+
+    PART_C_PATTERN = re.compile(
+        r"\bPART\s+[C]\d?\b",
+        re.IGNORECASE,
+    )
+
+    CONTRACT_TYPE_PATTERN = re.compile(
+        r"\b(NEC3|NEC\s+3|JBCC|JBCC\s+(?:Series\s+)?2000|JBCC\s+(?:Series\s+)?2014|"
+        r"GCC\s+2010|GCC\s+2015|GENERAL\s+CONDITIONS?\s+OF\s+CONTRACT\s+2010|"
+        r"GENERAL\s+CONDITIONS?\s+OF\s+CONTRACT\s+2015|"
+        r"FIDIC|FIDIC\s+(?:Red|Yellow|Silver|Green|Gold)\s+Book|"
+        r"NEW\s+ENGINEERING\s+CONTRACT|"
+        r"ENGINEERING\s+AND\s+CONSTRUCTION\s+CONTRACT)\b.*?(?=\n\s*\n|$)",
+        re.IGNORECASE,
+    )
+
+    LOCAL_CONTENT_PATTERN = re.compile(
+        r"(?:local\s+content|local\s+production|local\s+manufacture|"
+        r"local\s+procurement)\s*(?:and\s+content)?[:\s]+(\d+\s*%|minimum\s+\d+\s*%|"
+        r"\d+\s*percent)",
+        re.IGNORECASE,
+    )
+
+    HDI_PATTERN = re.compile(
+        r"(?:historically\s+disadvantaged|hdi|hdis?)\s*"
+        r"(?:individual|person|sub-contract|subcontract|ownership)?"
+        r".{0,80}?(\d+\s*%|\d+\s*percent)",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    EVAL_SUBCRITERIA_PATTERN = re.compile(
+        r"(?:experience|expertise|qualifications?|capacity|method\s+statement|"
+        r"project\s+(?:approach|plan|methodology)|safety|"
+        r"environmental|quality|management|"
+        r"past\s+performance|track\s+record|"
+        r"staffing|key\s+personnel|team|"
+        r"understanding|local\s+content|"
+        r"bbb?ee|preference|equity)"
+        r".{0,60}?(\d{1,3})\s*(?:points?|marks?|%|percent)",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    PROCUREMENT_VALUE_THRESHOLDS: list[tuple[str, float, str]] = [
+        ("petty cash", 0, "Below R2,000 — Petty Cash"),
+        ("written quotation", 2000, "R2,000–R10,000 — Written Quotation (3 quotes)"),
+        ("verbal quotation", 10000, "R10,000–R30,000 — Verbal Quotation (3 quotes)"),
+        ("written quotation high", 30000, "R30,000–R200,000 — Written Quotation (3+ quotes)"),
+        ("competitive bid", 200000, "R200,000–R1,000,000 — Competitive Bid (CIDB optional)"),
+        ("cidb bid", 1000000, "R1,000,000–R10,000,000 — Competitive Bid (CIDB required)"),
+        ("cidb high", 10000000, "Above R10,000,000 — Competitive Bid (CIDB + NT oversight)"),
+    ]
+
+    # Expanded municipality/district keywords for organization extraction
+    SA_ORG_KEYWORDS = {
+        "DM": "District Municipality",
+        "LM": "Local Municipality",
+        "DC": "District Council",
+        "MM": "Metro Municipality",
+        "NT": "National Treasury",
+    }
+
+    SA_MUNICIPALITIES = [
+        r"City\s+of\s+(?:Cape\s+Town|Johannesburg|Tshwane|Ek[eé]?r?urhuleni|"
+        r"eThekwini|Mbombela|Polokwane|Mangaung|Buffalo\s+City|Nelson\s+Mandela\s+Bay)",
+        r"u[Mm]gungundlovu",
+        r"u[Mm]khanyakude",
+        r"u[Tt]hukela",
+        r"u[Mm]zinyathi",
+        r"u[Mm]lalazi",
+        r"i[Nn]daka",
+        r"Zululand",
+        r"Harry\s+Gwala",
+        r"King\s+Cetshwayo",
+        r"Amajuba",
+        r"Capricorn",
+        r"Mopani",
+        r"Sekhukhune",
+        r"Vhembe",
+        r"Waterberg",
+        r"Ehlanzeni",
+        r"Gert\s+Sibande",
+        r"Nkangala",
+        r"Bojanala",
+        r"Ngaka\s+Modiri\s+Molema",
+        r"Dr\s+Kenneth\s+Kaunda",
+        r"Dr\s+Ruth\s+Segomotsi\s+Mompati",
+        r"Lejweleputswa",
+        r"Thabo\s+Mofutsanyana",
+        r"Fezile\s+Dabi",
+        r"Xhariep",
+        r"Sarah\s+Baartman",
+        r"Chris\s+Hani",
+        r"Joe\s+Gqabi",
+        r"Alfred\s+Nzo",
+        r"Amathole",
+        r"OR\s+Tambo",
+        r"Buffalo\s+City",
+        r"Nelson\s+Mandela\s+Bay",
+        r"Cacadu",
+        r"Frances\s+Baard",
+        r"John\s+Taolo\s+Gaetsewe",
+        r"Namakwa",
+        r"Pixley\s+ka\s+Seme",
+        r"ZF\s+Mgcawu",
+        r"Cape\s+Winelands",
+        r"Central\s+Karoo",
+        r"Garden\s+Route",
+        r"Overberg",
+        r"West\s+Coast",
+    ]
 
     BULLET_PATTERN = re.compile(
         r"(?:^|\n)\s*(?:[-•*◦▪►➤✓→·○●]|\d+[.)]\s|[a-zA-Z][.)]\s)\s*"
@@ -457,6 +672,12 @@ class TenderExtractor:
             result = self._extract_all_fields(normalized_text, pages_used)
 
             result.scanned_pages_detected = scanned_pages_detected
+            result.document_type = self._classify_document_type(normalized_text)
+            result.province = self._extract_province(normalized_text)
+            result.contract_type = self._extract_contract_type(normalized_text)
+            result.procurement_threshold = self._classify_procurement_threshold(
+                result.estimated_value
+            )
             result.confidence = self._calculate_confidence(result)
             result.raw_text_preview = normalized_text[:500] if normalized_text else None
             result.full_text = normalized_text[: self.FULL_TEXT_LIMIT] if normalized_text else ""
@@ -533,35 +754,46 @@ class TenderExtractor:
     # -------------------------------------------------------------------------
 
     def _extract_all_fields(self, text: str, pages_used: list[int]) -> ExtractionResult:
-        """Extract all fields from normalized text."""
+        """Extract all fields from normalized text.
+
+        For CIDB-standard documents (Part T1/T2), primary extraction uses
+        Part T1-only text to prevent pricing/contract data bleed.
+        """
 
         result = ExtractionResult(pages_used=pages_used)
 
-        sections = self._extract_all_sections(text)
-        values = self._extract_all_values(text)
+        # Use Part T1 restricted text for primary section extraction
+        primary_text = self._extract_part_t1_text(text)
+
+        sections = self._extract_all_sections(primary_text)
+        values = self._extract_all_values(primary_text)
 
         result.description = (
             self._section_as_text(sections.get("description"))
-            or self._extract_description_fallback(text)
+            or self._extract_description_fallback(primary_text)
             or ""
         )
 
         requirements = self._section_as_list(sections.get("requirements"))
         if not requirements:
-            requirements = self._extract_requirements_fallback(text)
+            requirements = self._extract_requirements_fallback(primary_text)
         result.requirements = requirements or ["No specific requirements found"]
 
         result.evaluation_criteria = (
             self._section_as_text(sections.get("evaluation"))
-            or self._extract_evaluation_fallback(text)
+            or self._extract_evaluation_fallback(primary_text)
             or ""
+        )
+
+        result.evaluation_structured = self._parse_evaluation_structured(
+            text, result.evaluation_criteria
         )
 
         result.special_conditions = self._section_as_text(sections.get("special")) or ""
 
         returnables = self._section_as_list(sections.get("returnable"))
         if not returnables:
-            returnables = self._extract_returnable_documents_fallback(text)
+            returnables = self._extract_returnable_documents_fallback(primary_text)
         result.returnable_documents = returnables
 
         result.tender_number = values.get("tender_number")
@@ -752,9 +984,9 @@ class TenderExtractor:
             if self._looks_like_reference(candidate):
                 return candidate
 
-        match = self.TENDER_NUMBER_ALT_PATTERN.search(text[:7000])
-        if match:
-            return self._clean_line(match.group(1))
+        alt_match = self.TENDER_NUMBER_ALT_PATTERN.search(text[:7000])
+        if alt_match:
+            return self._clean_line(alt_match.group(1))
 
         return None
 
@@ -781,9 +1013,6 @@ class TenderExtractor:
             lower = line.lower()
 
             if len(line) < 18:
-                continue
-
-            if "municipality" in lower and len(line) < 100:
                 continue
 
             if any(
@@ -839,6 +1068,14 @@ class TenderExtractor:
                     "consulting",
                     "professional",
                     "panel",
+                    "municipality",
+                    "municipal",
+                    "district",
+                    "metro",
+                    "department",
+                    "infrastructure",
+                    "development",
+                    "transport",
                 ]
             ):
                 candidates.append(line)
@@ -856,11 +1093,22 @@ class TenderExtractor:
         if match:
             return self._title_case_organization(match.group(1))
 
+        sa_muni_pattern = re.compile(
+            r"\b(" + "|".join(self.SA_MUNICIPALITIES) + r")\b",
+            re.IGNORECASE,
+        )
+        muni_match = sa_muni_pattern.search(text[:4000])
+        if muni_match:
+            return self._clean_line(muni_match.group(1))
+
         org_patterns = [
             r"(?:issued\s+by|employer)\s*:?\s*(.+?)(?:\n|$)",
             r"(?:name\s+of\s+municipality/municipal\s+entity)\s*:?\s*(.+?)(?:\n|$)",
             r"(?:department\s+of)\s+(.+?)(?:\n|$)",
             r"requirements\s+of\s+the\s+(.+?)(?:\n|$)",
+            r"((?:[A-Z][A-Za-z'.\-]+\s+){0,3}"  # DM / LM / DC patterns
+            r"(?:DM|LM|DC|MM)\s*[-–—]?\s*"
+            r"[A-Z][A-Za-z'.\-]+(?:\s+[A-Z][A-Za-z'.\-]+){0,3})",
         ]
 
         for pattern in org_patterns:
@@ -1156,6 +1404,24 @@ class TenderExtractor:
         elif bbbee_context:
             bbbee.details = self._clean_paragraph(bbbee_context[:1800])
 
+        # NEW: Local content and HDI extraction
+        local_content_match = self.LOCAL_CONTENT_PATTERN.search(search_text)
+        if local_content_match:
+            bbbee.local_content_requirement = self._clean_line(local_content_match.group(1))
+
+        hdi_match = self.HDI_PATTERN.search(search_text)
+        if hdi_match:
+            bbbee.hdi_requirement = self._clean_line(hdi_match.group(1))
+
+        if not bbbee.local_content_requirement and not bbbee.hdi_requirement:
+            local_content_anywhere = self.LOCAL_CONTENT_PATTERN.search(text)
+            if local_content_anywhere:
+                bbbee.local_content_requirement = self._clean_line(local_content_anywhere.group(1))
+
+            hdi_anywhere = self.HDI_PATTERN.search(text)
+            if hdi_anywhere:
+                bbbee.hdi_requirement = self._clean_line(hdi_anywhere.group(1))
+
         if bbbee.preferential_procurement and bbbee.points_allocation:
             bbbee.preference_points_system = (
                 f"{bbbee.preferential_procurement} preference system; "
@@ -1169,6 +1435,8 @@ class TenderExtractor:
             or bbbee.points_allocation
             or bbbee.details
             or bbbee.preferential_procurement
+            or bbbee.local_content_requirement
+            or bbbee.hdi_requirement
         ) else None
 
     def _extract_contact_fast(self, text: str, section: str) -> Optional[ContactInfo]:
@@ -1296,11 +1564,182 @@ class TenderExtractor:
         return self._clean_paragraph(match.group(0)) if match else None
 
     # -------------------------------------------------------------------------
+    # Phase 1: Document type, province, contract type, structured evaluation
+    # -------------------------------------------------------------------------
+
+    def _classify_document_type(self, text: str) -> str:
+        """Classify document as RFQ, TENDER, EOI, RFP, or unknown.
+
+        Scans first 3000 chars against DOC_TYPE_PATTERNS.
+        Order matters: RFQ checked first to avoid false positives.
+        """
+
+        head = text[:3000].lower()
+
+        if self.DOC_TYPE_PATTERNS[DocType.RFQ].search(head):
+            return DocType.RFQ
+        if self.DOC_TYPE_PATTERNS[DocType.EOI].search(head):
+            return DocType.EOI
+        if self.DOC_TYPE_PATTERNS[DocType.RFP].search(head):
+            return DocType.RFP
+        if self.DOC_TYPE_PATTERNS[DocType.TENDER].search(head):
+            return DocType.TENDER
+
+        return DocType.UNKNOWN
+
+    def _extract_part_t1_text(self, text: str) -> str:
+        """If Part T1 is found, restrict extraction to text before Part T2 / Part C.
+
+        For CIDB-standard documents, scope/description lives in Part T1.
+        Part T2 and Part C contain pricing and contract data that bleeds into
+        description, requirements, and evaluation sections.
+        """
+
+        t1_match = self.PART_T1_PATTERN.search(text)
+        if not t1_match:
+            return text
+
+        # Find the earliest boundary after Part T1
+        boundaries: list[int] = []
+        for pattern in (self.PART_T2_PATTERN, self.PART_C_PATTERN):
+            match = pattern.search(text, t1_match.end())
+            if match:
+                boundaries.append(match.start())
+
+        if boundaries:
+            return text[t1_match.start():min(boundaries)]
+
+        return text
+
+    def _extract_province(self, text: str) -> Optional[str]:
+        """Extract province from document text.
+
+        Scans first 8000 chars. Returns the first province match.
+        KZN is normalized to 'KwaZulu-Natal'.
+        """
+
+        match = self.PROVINCE_PATTERN.search(text[:8000])
+        if not match:
+            return None
+
+        province = match.group(0).strip()
+
+        province_normalized = {
+            "kzn": "KwaZulu-Natal",
+            "kwazulu-natal": "KwaZulu-Natal",
+            "kwazulu natal": "KwaZulu-Natal",
+            "kwa-zulu natal": "KwaZulu-Natal",
+            "kwa zulu natal": "KwaZulu-Natal",
+        }
+
+        lower = province.lower()
+        return province_normalized.get(lower, province.title())
+
+    def _extract_contract_type(self, text: str) -> Optional[str]:
+        """Extract contract framework type from document text.
+
+        Scans first 15000 chars. Matches NEC3, JBCC, GCC, FIDIC variants.
+        """
+
+        match = self.CONTRACT_TYPE_PATTERN.search(text[:15000])
+        if not match:
+            return None
+
+        return self._clean_line(match.group(0))
+
+    def _parse_evaluation_structured(
+        self, text: str, evaluation_text: str
+    ) -> Optional[EvaluationCriteria]:
+        """Parse evaluation criteria into structured format.
+
+        Returns an EvaluationCriteria with:
+        - system: 80/20 or 90/10 preference point system
+        - functionality_threshold: minimum qualifying score
+        - sub_criteria: list of EvaluationSubCriterion (name + weight)
+        - details: full evaluation text
+        """
+
+        search_text = evaluation_text if evaluation_text else text[:15000]
+
+        if not search_text.strip():
+            return None
+
+        ev = EvaluationCriteria()
+
+        # Detect preference point system
+        system_match = self.PREFERENTIAL_PROC_PATTERN.search(search_text)
+        if system_match:
+            ev.system = self._clean_line(system_match.group(1))
+
+        # Detect functionality threshold
+        threshold_match = self.FUNCTIONALITY_THRESHOLD_PATTERN.search(search_text)
+        if threshold_match:
+            ev.functionality_threshold = self._clean_line(threshold_match.group(1))
+
+        # Extract sub-criteria with point weights
+        for match in self.EVAL_SUBCRITERIA_PATTERN.finditer(search_text):
+            criterion = self._clean_line(match.group(0).rsplit(None, 1)[0].strip(" :,;\n\r"))
+            try:
+                weight = int(match.group(1))
+            except ValueError:
+                continue
+
+            if criterion and weight > 0 and weight <= 100:
+                ev.sub_criteria.append(EvaluationSubCriterion(
+                    criterion=criterion[:80],
+                    weight=weight,
+                ))
+
+        if evaluation_text:
+            ev.details = evaluation_text[:2000]
+
+        if ev.system or ev.functionality_threshold or ev.sub_criteria or ev.details:
+            return ev
+
+        return None
+
+    def _classify_procurement_threshold(self, estimated_value: Optional[str]) -> Optional[str]:
+        """Classify estimated value into NT procurement threshold label.
+
+        Returns None if value cannot be parsed.
+        """
+
+        if not estimated_value:
+            return None
+
+        value_clean = re.sub(r"[^\d.,\s]", "", estimated_value)
+        value_clean = value_clean.replace(",", "").replace(" ", "")
+
+        try:
+            if "." in value_clean:
+                value_num = float(value_clean)
+            else:
+                value_num = float(value_clean)
+        except (ValueError, TypeError):
+            return None
+
+        if "million" in estimated_value.lower() or "mil" in estimated_value.lower():
+            value_num *= 1000000
+        elif "thousand" in estimated_value.lower():
+            value_num *= 1000
+
+        label = f"Estimated R{value_num:,.0f} — "
+        for name, threshold, description in reversed(self.PROCUREMENT_VALUE_THRESHOLDS):
+            if value_num >= threshold:
+                return label + description
+
+        return label + "Below threshold"
+
+    # -------------------------------------------------------------------------
     # Confidence
     # -------------------------------------------------------------------------
 
     def _calculate_confidence(self, result: ExtractionResult) -> float:
-        """Calculate confidence score from extracted fields."""
+        """Calculate confidence score from extracted fields.
+
+        Document-type-aware: RFQs get a higher relative score because
+        they naturally have fewer fields.
+        """
 
         score = 0.0
 
@@ -1331,7 +1770,19 @@ class TenderExtractor:
         if result.scanned_pages_detected:
             score -= 0.2
 
-        return round(max(0.0, min(1.0, score / 9.7)), 2)
+        # NEW signals
+        if result.document_type and result.document_type != DocType.UNKNOWN:
+            score += 0.4
+        if result.contract_type:
+            score += 0.3
+        if result.evaluation_structured:
+            score += 0.5
+        if result.procurement_threshold:
+            score += 0.3
+
+        denominator = 9.7 + (0.4 if result.document_type != DocType.UNKNOWN else 0)
+
+        return round(max(0.0, min(1.0, score / denominator)), 2)
 
     # -------------------------------------------------------------------------
     # Utility helpers
