@@ -112,6 +112,15 @@ class ExtractorRegistry:
         cls._class_cache[class_name] = extractor_class
         return extractor_class
 
+    # Extensions that correspond to ZIP-based formats that should be
+    # resolved by extension when PK magic bytes are detected.
+    _ZIP_BASED_EXTENSIONS: dict[str, str] = {
+        '.docx': 'DocxExtractor',
+        '.xlsx': 'XlsxExtractor',
+        '.pptx': 'PptxExtractor',
+        '.odt': 'OdtExtractor',
+    }
+
     @classmethod
     def get_extractor(
         cls,
@@ -126,17 +135,47 @@ class ExtractorRegistry:
             2. File extension from filename
             3. MIME type (least reliable)
 
+        Special handling: ZIP magic bytes (PK\\x03\\x04) are shared by ZIP
+        archives and Office Open XML formats (DOCX, XLSX, PPTX). When PK
+        magic is detected, the extension is checked to disambiguate.
+
         Returns None if the document type cannot be determined or if the
         corresponding extractor module is not yet installed.
         """
         # Priority 1: Magic byte / content sniffing
-        class_name = cls._detect_by_magic(data)
-        if class_name:
-            extractor_class = cls._get_extractor_class(class_name)
+        magic_class = cls._detect_by_magic(data)
+
+        if magic_class == 'ZipExtractor':
+            # ZIP magic bytes match — also check if the extension indicates
+            # a specific Office Open XML format (DOCX, XLSX, PPTX).
+            if filename:
+                ext = cls._get_extension(filename)
+                office_class = cls._ZIP_BASED_EXTENSIONS.get(ext)
+                if office_class:
+                    extractor_class = cls._get_extractor_class(office_class)
+                    if extractor_class is not None:
+                        return extractor_class()
+
+            # Also check extension for .zip
+            if filename:
+                ext = cls._get_extension(filename)
+                if ext == '.zip':
+                    extractor_class = cls._get_extractor_class(magic_class)
+                    if extractor_class is not None:
+                        return extractor_class()
+
+            # Fall back to generic ZipExtractor
+            extractor_class = cls._get_extractor_class(magic_class)
             if extractor_class is not None:
                 return extractor_class()
 
-        # Priority 2: File extension
+        elif magic_class is not None:
+            # Non-ZIP magic match (PDF, CFB)
+            extractor_class = cls._get_extractor_class(magic_class)
+            if extractor_class is not None:
+                return extractor_class()
+
+        # Priority 2: File extension (only if magic didn't match)
         if filename:
             ext = cls._get_extension(filename)
             class_name = cls.EXTENSION_MAP.get(ext)
