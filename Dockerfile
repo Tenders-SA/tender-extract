@@ -21,6 +21,12 @@ FROM python:3.12-slim-bookworm
 
 WORKDIR /app
 
+# Install runtime system packages for legacy document format support
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    antiword \
+    catdoc \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy installed packages from builder
 COPY --from=builder /root/.local /root/.local
 

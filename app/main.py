@@ -12,7 +12,7 @@ import sys
 import logging
 from contextlib import asynccontextmanager
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -58,10 +58,6 @@ ALLOWED_URL_HOSTS = {
     if host.strip()
 }
 
-PDF_MAGIC = b"%PDF"
-PDF_SNIFF_BYTES = 5
-
-
 def _is_allowed_url(url: str) -> bool:
     """Allow only trusted HTTP(S) document sources."""
     try:
@@ -82,18 +78,20 @@ def _is_allowed_url(url: str) -> bool:
     # Allow direct Cloudflare R2 object URLs when explicitly passed by the main app.
     if hostname.endswith(".r2.cloudflarestorage.com"):
         return True
-    # We need to simply just allow the main app to pass through any URL it has already validated, since it may be fetching from a variety of sources. The main app should be responsible for validating and sanitizing URLs before passing them to this extraction service. Therefore, we will not enforce strict host checks here, but we will enforce that the URL is well-formed and uses HTTP/S.
-    return True
-    # return False
+
+    # Allow subdomains of docs.tenders-sa.org (e.g. service-1.docs.tenders-sa.org)
+    if hostname == "docs.tenders-sa.org" or hostname.endswith(".docs.tenders-sa.org"):
+        return True
+
+    # Allow localhost for development/testing
+    if hostname in {"localhost", "127.0.0.1", "0.0.0.0"}:
+        return True
+
+    return False
 
 
-def _looks_like_pdf(pdf_bytes: bytes) -> bool:
-    """PDFs should start with %PDF, allowing tiny leading whitespace/BOM."""
-    return pdf_bytes[:PDF_SNIFF_BYTES].lstrip().startswith(PDF_MAGIC)
-
-
-async def _fetch_pdf_from_url(url: str) -> bytes:
-    """Fetch PDF bytes from a trusted URL with safer limits and diagnostics."""
+async def _fetch_document_from_url(url: str) -> bytes:
+    """Fetch document bytes from a trusted URL with safer limits and diagnostics."""
     if not _is_allowed_url(url):
         logger.warning("Blocked extraction fetch for untrusted URL", {"url": url[:200]})
         raise HTTPException(status_code=422, detail="URL host is not allowed for extraction")
@@ -108,7 +106,7 @@ async def _fetch_pdf_from_url(url: str) -> bytes:
 
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, max_redirects=MAX_REDIRECTS) as client:
-            async with client.stream("GET", url, headers={"Accept": "application/pdf,*/*"}) as response:
+            async with client.stream("GET", url, headers={"Accept": "*/*"}) as response:
                 response.raise_for_status()
 
                 content_length = response.headers.get("content-length")
@@ -138,7 +136,7 @@ async def _fetch_pdf_from_url(url: str) -> bytes:
                             detail=f"Fetched file exceeds maximum size of {MAX_FILE_SIZE // (1024 * 1024)}MB"
                         )
 
-                pdf_bytes = b"".join(chunks)
+                document_bytes = b"".join(chunks)
 
     except httpx.TimeoutException:
         raise HTTPException(status_code=504, detail=f"URL fetch timeout (>{URL_FETCH_TIMEOUT}s)")
@@ -147,13 +145,10 @@ async def _fetch_pdf_from_url(url: str) -> bytes:
     except httpx.RequestError as e:
         raise HTTPException(status_code=422, detail=f"Failed to fetch URL: {str(e)}")
 
-    if not pdf_bytes:
+    if not document_bytes:
         raise HTTPException(status_code=422, detail="Fetched file is empty")
 
-    if not _looks_like_pdf(pdf_bytes):
-        raise HTTPException(status_code=415, detail="Fetched file is not a valid PDF")
-
-    return pdf_bytes
+    return document_bytes
 
 
 # ============= LIFESPAN MANAGEMENT =============
@@ -163,13 +158,17 @@ async def lifespan(app: FastAPI):
     logger.info(f"Application startup - version {__version__}")
     logger.info(f"Python version: {sys.version}")
 
-    logger.info("Loading PDF extraction dependencies...")
+    logger.info("Loading document extraction dependencies...")
     try:
+        # Pre-load all extractor modules so imports are warmed up
+        from .extractors import ExtractorRegistry  # noqa: F401
         from .extractor import TenderExtractor
+
+        # Keep TenderExtractor for backward-compatible readiness probes
         app.state.extractor = TenderExtractor()
-        logger.info("Extractor initialized successfully")
+        logger.info("Document extractors initialized successfully")
     except Exception as e:
-        logger.error(f"Failed to initialize extractor: {e}", exc_info=True)
+        logger.error(f"Failed to initialize extractors: {e}", exc_info=True)
         app.state.extractor = None
 
     yield
@@ -227,34 +226,42 @@ async def extract_tender(
     request: Request,
     file: Optional[UploadFile] = File(None),
 ) -> ExtractResponse:
-    """Extract comprehensive tender information from a PDF.
+    """Extract comprehensive tender information from a document.
 
     Accepts either:
-    - A PDF file via multipart/form-data upload
-    - A JSON body with a URL to fetch the PDF from
+    - A document file via multipart/form-data upload (any supported format)
+    - A JSON body with a URL to fetch the document from
+
+    Supported formats are detected automatically via ExtractorRegistry
+    (magic bytes > file extension > MIME type).
     """
     if not hasattr(request.app.state, 'extractor') or request.app.state.extractor is None:
         logger.error("Extract called but extractor not initialized")
         raise HTTPException(status_code=503, detail="Service temporarily unavailable - extractor not initialized")
 
     from .extractor import UnsearchablePDF
-    extractor = request.app.state.extractor
+    from .extractors import ExtractorRegistry
 
-    pdf_bytes: bytes
+    document_bytes: bytes
+    url_filename: Optional[str] = None
 
     if file is not None:
-        content_type = file.content_type or ""
-        filename = file.filename or ""
-        if not content_type.startswith("application/pdf") and not filename.lower().endswith(".pdf"):
-            raise HTTPException(status_code=415, detail="Not a PDF file. Content-Type must be application/pdf")
+        document_bytes = await file.read()
 
-        pdf_bytes = await file.read()
-
-        if len(pdf_bytes) > MAX_FILE_SIZE:
+        if len(document_bytes) > MAX_FILE_SIZE:
             raise HTTPException(status_code=422, detail=f"File exceeds maximum size of {MAX_FILE_SIZE // (1024 * 1024)}MB")
 
-        if not _looks_like_pdf(pdf_bytes):
-            raise HTTPException(status_code=415, detail="Uploaded file is not a valid PDF")
+        # Detect extractor from file bytes, filename, and content type
+        extractor = ExtractorRegistry.get_extractor(
+            document_bytes,
+            filename=file.filename,
+            mime_type=file.content_type,
+        )
+        if extractor is None:
+            raise HTTPException(
+                status_code=415,
+                detail="Unsupported file type. Supported formats: PDF, DOCX, DOC, XLSX, XLS, PPTX, ODT, RTF, CSV, TXT, ZIP"
+            )
 
     else:
         try:
@@ -268,10 +275,25 @@ async def extract_tender(
         except Exception:
             raise HTTPException(status_code=422, detail="Provide either a file upload or a URL in the request body")
 
-        pdf_bytes = await _fetch_pdf_from_url(url)
+        document_bytes = await _fetch_document_from_url(url)
+
+        # Extract filename from URL for extension-based type disambiguation
+        parsed_url = urlparse(url)
+        url_filename = os.path.basename(unquote(parsed_url.path)) or None
+
+        # Detect extractor from document bytes and URL filename
+        extractor = ExtractorRegistry.get_extractor(
+            document_bytes,
+            filename=url_filename,
+        )
+        if extractor is None:
+            raise HTTPException(
+                status_code=415,
+                detail="Unsupported document type. Supported formats: PDF, DOCX, DOC, XLSX, XLS, PPTX, ODT, RTF, CSV, TXT, ZIP"
+            )
 
     try:
-        result = extractor.extract(pdf_bytes)
+        result = extractor.extract(document_bytes, filename=url_filename or (file.filename if file else None))
     except UnsearchablePDF as e:
         raise HTTPException(status_code=501, detail=str(e))
     except Exception as e:
