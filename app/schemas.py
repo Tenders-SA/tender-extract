@@ -68,7 +68,6 @@ class ExtractResponse(BaseModel):
     )
     requirements: list[str] = Field(
         ...,
-        min_length=1,
         description="List of requirements extracted from the tender"
     )
     

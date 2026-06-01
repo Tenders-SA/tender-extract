@@ -126,10 +126,12 @@ class TestMergeExtractionResults:
     """Tests for the merge_extraction_results function."""
 
     def test_empty_list(self):
-        """Empty result list returns empty ExtractionResult with 0 confidence."""
+        """Empty result list returns fallback ExtractionResult."""
         result = merge_extraction_results([])
         assert isinstance(result, ExtractionResult)
         assert result.confidence == 0.0
+        assert result.requirements == ["No document content found in ZIP archive"]
+        assert result.full_text == ""
 
     def test_single_result(self):
         """Single result is returned as-is."""

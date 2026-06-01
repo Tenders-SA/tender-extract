@@ -347,7 +347,7 @@ async def extract_tender(
 
     return ExtractResponse(
         description=result.description,
-        requirements=result.requirements,
+        requirements=result.requirements or ["No specific requirements found"],
         tender_number=result.tender_number,
         title=result.title,
         closing_date=result.closing_date,

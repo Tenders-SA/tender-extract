@@ -109,7 +109,11 @@ def merge_extraction_results(results: list[ExtractionResult]) -> ExtractionResul
         - Confidence: weighted average across all results.
     """
     if not results:
-        return ExtractionResult(confidence=0.0)
+        return ExtractionResult(
+            full_text="",
+            confidence=0.0,
+            requirements=["No document content found in ZIP archive"],
+        )
 
     if len(results) == 1:
         return results[0]
