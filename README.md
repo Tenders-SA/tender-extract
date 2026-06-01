@@ -1,6 +1,6 @@
 # Tender Extract API
 
-FastAPI microservice that extracts structured tender data from South African government PDF documents using deterministic regex-based pattern matching.
+FastAPI microservice that extracts structured tender data from South African government procurement documents using deterministic extraction. Supports PDF, DOCX, DOC, XLSX, XLS, PPTX, ODT, RTF, CSV, TXT, and ZIP archives.
 
 ---
 
@@ -8,11 +8,9 @@ FastAPI microservice that extracts structured tender data from South African gov
 
 [Tenders-SA.org](https://www.tenders-sa.org) is an **AI-powered tender matching and application platform** for South African businesses. It aggregates tenders from national, provincial, and municipal government departments, SOEs (Eskom, Transnet, SANRAL), and public entities — sourced directly from official OCDS (Open Contracting Data Standard) feeds.
 
-The platform goes beyond simple aggregation: AI enrichment extracts key requirements, generates summaries, estimates tender values, classifies categories, and calculates compatibility scores between your company profile and each opportunity.
-
 ### Role of This Microservice
 
-Government tender PDFs are the raw source of truth for procurement opportunities. The **Tender Extract API** sits in the ingestion pipeline between the Cloudflare Worker (which fetches raw OCDS data and PDF documents) and the main application database. It converts unstructured PDF documents into structured, queryable data fields such as:
+Government tender documents are the raw source of truth for procurement opportunities. The **Tender Extract API** converts unstructured documents into structured, queryable data fields such as:
 
 - Description and scope of work
 - Requirements and eligibility criteria
@@ -25,14 +23,14 @@ Government tender PDFs are the raw source of truth for procurement opportunities
 - Evaluation criteria and returnable documents
 - Confidence scores for extraction quality
 
-This service is intentionally **fast and deterministic** — it uses regex-based extraction with PyMuPDF, not AI/LLM processing. When extraction confidence is low, the main application decides whether to run AI fallback enrichment. This keeps the extraction layer cheap, fast, and reliable.
+This service is intentionally **fast and deterministic** — it uses regex-based extraction and format-specific parsers, not AI/LLM processing. When extraction confidence is low, the main application decides whether to run AI fallback enrichment.
 
 ### Pipeline Architecture
 
 ```mermaid
 graph LR
-    A[Cloudflare Worker] -->|Raw OCDS + PDF URL| B[Tender Ingestion Service]
-    B -->|PDF URL / File| C[Tender Extract API]
+    A[Cloudflare Worker] -->|Raw OCDS + Document URL| B[Main App<br/>Ingestion Service]
+    B -->|URL| C[Tender Extract API]
     C -->|Structured JSON| B
     B -->|Mapped Data| D[(Main Database)]
     D --> E[AI Enrichment<br/>(if confidence low)]
@@ -42,15 +40,18 @@ graph LR
 
 ## Features
 
+- **Multi-format extraction** — PDF, DOCX, DOC, XLSX, XLS, PPTX, ODT, RTF, CSV, TXT
+- **ZIP archive support** — Recursive extraction of mixed-format bid packs with result merging
+- **Plugin architecture** — Each format is a self-contained extractor module implementing `BaseExtractor`
+- **Content-type detection** — Magic byte sniffing > file extension > MIME type priority chain
 - **Regex-first extraction** — Deterministic pattern matching tuned for South African government tender formats
 - **SA tender optimized** — Patterns cover CIDB gradings, B-BBEE levels, 80/20 and 90/10 preference systems, MBD/SBD returnable document forms, and SA procurement terminology
 - **Comprehensive field extraction** — 20+ structured fields including description, requirements, dates, organization, financials, B-BBEE, contact, briefing sessions, evaluation criteria, and returnable documents
 - **Multiple input modes** — File upload (multipart) or URL fetch (JSON)
 - **Confidence scoring** — Weighted quality indicator (0.0–1.0) for extraction reliability
-- **Scanned PDF detection** — Explicit detection of image-only pages, returns 501 rather than producing garbage output
 - **Full text passthrough** — Always returns raw extracted text for AI fallback in the main application
-- **Cloud-native** — Docker multi-stage build, health/readiness/startup probes, optimized for Cloud Run
-- **Zero AI dependencies** — No LLM, no OCR, no external APIs. Pure Python + PyMuPDF
+- **URL validation** — Enforced allowlist for trusted document hosts
+- **Zero AI dependencies** — No LLM, no OCR, no external APIs.
 
 ---
 
@@ -86,8 +87,6 @@ docker run -p 8080:8080 tender-extract
 GET /health
 ```
 
-Returns service health status.
-
 ```json
 {
   "status": "healthy",
@@ -109,7 +108,7 @@ Returns `200` when the extractor is initialized and ready for traffic, `503` dur
 POST /v1/extract
 ```
 
-Extracts structured tender information from a PDF. Accepts either a file upload or a URL.
+Extracts structured tender information from a document. Accepts either a file upload or a URL. Supports all formats: PDF, DOCX, DOC, XLSX, XLS, PPTX, ODT, RTF, CSV, TXT, ZIP.
 
 #### Mode A: File Upload
 
@@ -128,6 +127,8 @@ curl -X POST http://localhost:8000/v1/extract \
 
 #### Response
 
+The response shape is identical regardless of input format:
+
 ```json
 {
   "description": "Supply and delivery of office stationery and consumables...",
@@ -142,32 +143,9 @@ curl -X POST http://localhost:8000/v1/extract \
   "issuing_organization": "Department of Public Works",
   "department": "Supply Chain Management",
   "estimated_value": "R 5,000,000.00",
-  "bbbee": {
-    "minimum_level": "1",
-    "points_allocation": "80/20"
-  },
-  "contact": {
-    "name": "Mr. John Doe",
-    "email": "john.doe@dpw.gov.za",
-    "phone": "012 345 6789",
-    "department": "Supply Chain Management"
-  },
-  "briefing_session": {
-    "date": "15 March 2026",
-    "time": "10:00",
-    "venue": "DPW Boardroom, Pretoria",
-    "is_compulsory": true
-  },
-  "evaluation_criteria": "80/20 preference point system will apply...",
-  "returnable_documents": [
-    "SBD 1 - Invitation to Bid",
-    "SBD 4 - Declaration of Interest",
-    "Tax Clearance Certificate"
-  ],
   "confidence": 0.87,
-  "pages_used": [0, 1, 2, 3],
   "full_text": "DEPARTMENT OF PUBLIC WORKS...",
-  "raw_text_preview": "DEPARTMENT OF PUBLIC WORKS..."
+  ...
 }
 ```
 
@@ -197,8 +175,13 @@ curl -X POST http://localhost:8000/v1/extract \
 | `evaluation_criteria` | `string` | Evaluation and scoring criteria |
 | `special_conditions` | `string` | Special conditions of contract |
 | `returnable_documents` | `list[string]` | Documents to be submitted |
+| `document_type` | `string` | Classified document type (RFQ, TENDER, EOI, RFP) |
+| `province` | `string` | Province extracted from document |
+| `contract_type` | `string` | Contract framework (NEC3, JBCC, GCC, FIDIC) |
+| `procurement_threshold` | `string` | NT threshold classification |
+| `evaluation_structured` | `object` | Structured evaluation sub-criteria |
 | `confidence` | `float` | Extraction confidence (0.0–1.0) |
-| `pages_used` | `list[int]` | 0-indexed pages analyzed |
+| `pages_used` | `list[int]` | 0-indexed pages/sheets analyzed |
 | `raw_text_preview` | `string` | First 500 chars of extracted text |
 | `full_text` | `string` | Complete extracted text (up to 50KB) |
 
@@ -206,7 +189,7 @@ curl -X POST http://localhost:8000/v1/extract \
 
 | Status | Code | Description |
 |--------|------|-------------|
-| 415 | `UNSUPPORTED_MEDIA_TYPE` | Not a PDF file (wrong Content-Type or magic bytes) |
+| 415 | `UNSUPPORTED_MEDIA_TYPE` | Unsupported document format (wrong magic bytes, extension, or MIME type) |
 | 422 | `UNPROCESSABLE_ENTITY` | Validation error — file too large, invalid URL, URL fetch failure |
 | 501 | `NOT_IMPLEMENTED` | Scanned/image-only PDF detected (OCR not supported) |
 | 504 | `GATEWAY_TIMEOUT` | URL fetch timed out (configurable, default 90s) |
@@ -219,50 +202,20 @@ curl -X POST http://localhost:8000/v1/extract \
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
-| `MAX_FILE_SIZE_BYTES` | `104857600` (100MB) | Maximum PDF file size |
-| `MAX_PAGES` | `30` | Maximum pages to analyze |
+| `MAX_FILE_SIZE_BYTES` | `104857600` (100MB) | Maximum document file size |
 | `URL_FETCH_TIMEOUT_SECONDS` | `90.0` | Timeout for URL fetching |
 | `URL_FETCH_MAX_REDIRECTS` | `5` | Maximum redirects to follow |
 | `ALLOWED_URL_HOSTS` | `etenders-api.tenders-sa.org, docs.tenders-sa.org, www.etenders.gov.za, etenders.gov.za` | Comma-separated trusted document URL hosts |
 | `GUNICORN_WORKERS` | `2` | Gunicorn worker processes |
 | `GUNICORN_TIMEOUT` | `120` | Gunicorn worker timeout (seconds) |
 | `LOG_LEVEL` | `info` | Logging level |
-| `PORT` | `8080` | HTTP port (Cloud Run default) |
+| `PORT` | `8080` | HTTP port |
 
 ---
 
 ## Deployment
 
-### Cloud Run (Google)
-
-```bash
-# Build and push
-gcloud builds submit --tag gcr.io/YOUR_PROJECT/tender-extract
-
-# Deploy
-gcloud run deploy tender-extract \
-  --image gcr.io/YOUR_PROJECT/tender-extract \
-  --platform managed \
-  --memory 512Mi \
-  --timeout 180
-```
-
-### Render.com
-
-```bash
-render blueprints apply
-```
-
-Uses the included `render.yaml` blueprint definition.
-
-### Fly.io
-
-```bash
-fly launch
-fly deploy
-```
-
-Uses the included `fly.toml` configuration.
+Deployed on **AWS EC2**. See the main project deployment documentation for infrastructure details.
 
 ### Docker
 
@@ -278,21 +231,35 @@ docker run -p 8080:8080 tender-extract
 ```
 tender-extract/
 ├── app/
-│   ├── __init__.py        # Package info
-│   ├── main.py            # FastAPI app, routes, lifespan
-│   ├── extractor.py       # Core extraction logic (1495 lines)
-│   └── schemas.py         # Pydantic models for request/response
+│   ├── __init__.py           # Package info
+│   ├── main.py               # FastAPI app, routes, URL validation, multi-format routing
+│   ├── extractor.py          # Shared data types (ExtractionResult, etc.)
+│   ├── schemas.py            # Pydantic request/response models
+│   └── extractors/           # Plugin-based extractor modules
+│       ├── __init__.py       # ExtractorRegistry — maps extensions/MIME/magic bytes
+│       ├── base.py           # BaseExtractor abstract class
+│       ├── pdf_extractor.py  # PDF (PyMuPDF)
+│       ├── docx_extractor.py # DOCX (python-docx)
+│       ├── legacy_doc_extractor.py  # Legacy .doc (antiword/catdoc + binary fallback)
+│       ├── xlsx_extractor.py # XLSX (openpyxl)
+│       ├── xls_extractor.py  # XLS (xlrd)
+│       ├── pptx_extractor.py # PPTX (python-pptx)
+│       ├── odt_extractor.py  # ODT (odfpy)
+│       ├── rtf_extractor.py  # RTF (striprtf)
+│       ├── text_extractor.py # CSV/TXT (stdlib)
+│       └── zip_extractor.py  # ZIP (zipfile + recursive dispatch + result merging)
 ├── docs/
-│   ├── API_REFERENCE.md   # Detailed API reference
-│   ├── INTEGRATION_GUIDE.md # Ingestion pipeline integration docs
-│   └── openapi.json       # OpenAPI 3.0 specification
+│   ├── API_REFERENCE.md      # Detailed API reference
+│   ├── INTEGRATION_GUIDE.md  # Ingestion pipeline integration docs
+│   └── openapi.json          # OpenAPI 3.0 specification
 ├── tests/
-│   └── fixtures/          # Sample PDFs for testing
-├── Dockerfile             # Multi-stage build for Cloud Run
-├── render.yaml            # Render.com blueprint
-├── fly.toml               # Fly.io configuration
-├── gunicorn.conf.py       # Gunicorn server config
-├── requirements.txt       # Python dependencies
+│   ├── __init__.py
+│   ├── test_extractors.py    # 108 tests covering all extractors + registry
+│   ├── test_zip_merge.py     # ZIP merger/reconciliation tests
+│   └── test_url_policy.py    # URL allowlist + fetch policy tests
+├── Dockerfile                # Multi-stage build for deployment
+├── gunicorn.conf.py          # Gunicorn server config
+├── requirements.txt          # Python dependencies
 └── README.md
 ```
 
@@ -300,26 +267,27 @@ tender-extract/
 
 ## Development
 
-### Type Checking
-
-```bash
-pip install mypy
-mypy --python-version 3.13 app/
-```
-
 ### Testing
 
 ```bash
 pip install pytest pytest-asyncio
-pytest tests/
+pytest tests/ -v
 ```
+
+Currently **108 tests** covering all extractors, registry dispatch, ZIP merging, and URL policy.
+
+### Adding a New Extractor
+
+1. Create a new file in `app/extractors/` implementing `BaseExtractor`
+2. Register it in `ExtractorRegistry` in `__init__.py` (extension, MIME, and/or magic bytes)
+3. All existing tests must still pass
 
 ### Design Principles
 
-1. **No AI in the extraction path** — This service uses deterministic regex matching only. AI enrichment is a separate concern handled by the main application when confidence is low (`confidence < 0.55` or missing critical fields)
-2. **SA-specific patterns** — All regex patterns are designed and tuned for South African government tender formats, including CIDB grading, B-BBEE scoring, MBD/SBD returnable forms, and SA procurement language
-3. **Fast and stateless** — Designed for horizontal scaling. Each request is independent with no shared state
-4. **Graceful degradation** — Always returns a result, even for poorly formatted PDFs. Low-confidence results signal the main app to run AI fallback
+1. **No AI in the extraction path** — Deterministic extraction only. AI enrichment is a separate concern handled by the main application when confidence is low.
+2. **SA-specific patterns** — All regex patterns are designed and tuned for South African government tender formats.
+3. **Plugin architecture** — Each format is a self-contained module. Adding a new format never modifies existing extractors.
+4. **Graceful degradation** — Always returns a result, even for poorly formatted documents. Low-confidence results signal the main app to run AI fallback.
 
 ---
 
