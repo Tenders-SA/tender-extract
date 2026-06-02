@@ -189,6 +189,48 @@ class ExtractResponse(BaseModel):
         description="Structured evaluation criteria with sub-criteria and weightings"
     )
     
+    # NEW: Phase 2 extended taxonomy sections
+    contractual_terms: Optional[str] = Field(
+        default=None,
+        description="Contractual terms, liabilities, dispute resolution"
+    )
+    quality_management: Optional[str] = Field(
+        default=None,
+        description="Quality management, inspection, QA/QC"
+    )
+    health_safety: Optional[str] = Field(
+        default=None,
+        description="Health and safety requirements, SHE file"
+    )
+    environmental: Optional[str] = Field(
+        default=None,
+        description="Environmental impact assessment, compliance"
+    )
+    methodology: Optional[str] = Field(
+        default=None,
+        description="Method statement, execution plan approach"
+    )
+    experience_qualifications: Optional[str] = Field(
+        default=None,
+        description="Experience, past projects, key personnel"
+    )
+    pricing_schedule: Optional[str] = Field(
+        default=None,
+        description="Pricing schedule, bill of quantities, rates"
+    )
+    extended_sections: Optional[dict[str, str]] = Field(
+        default=None,
+        description="Dynamic extended sections from fallback classification"
+    )
+    unclassified_content: Optional[str] = Field(
+        default=None,
+        description="Content that neither regex nor fallback could classify"
+    )
+    extraction_version: int = Field(
+        default=1,
+        description="1 = legacy 8-pattern, 2 = extended taxonomy 15-pattern"
+    )
+
     # Metadata
     confidence: float = Field(
         ...,

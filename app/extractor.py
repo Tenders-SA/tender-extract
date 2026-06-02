@@ -136,6 +136,22 @@ class ExtractionResult:
     procurement_threshold: Optional[str] = None
     evaluation_structured: Optional[EvaluationCriteria] = None
 
+    # Phase 2 extended taxonomy sections (14+ section extraction)
+    contractual_terms: str = ""
+    quality_management: str = ""
+    health_safety: str = ""
+    environmental: str = ""
+    methodology: str = ""
+    experience_qualifications: str = ""
+    pricing_schedule: str = ""
+
+    # Dynamic extended sections map for non-standard section types
+    extended_sections: dict[str, str] = field(default_factory=dict)
+    # Content neither regex nor fallback could classify
+    unclassified_content: str = ""
+    # 1 = legacy 8-pattern, 2 = extended taxonomy 15-pattern
+    extraction_version: int = 1
+
     confidence: float = 0.0
     pages_used: list[int] = field(default_factory=list)
     raw_text_preview: Optional[str] = None

@@ -386,6 +386,18 @@ async def extract_tender(
         evaluation_criteria=result.evaluation_criteria,
         special_conditions=result.special_conditions,
         returnable_documents=result.returnable_documents,
+        # Phase 2 extended taxonomy
+        contractual_terms=result.contractual_terms or None,
+        quality_management=result.quality_management or None,
+        health_safety=result.health_safety or None,
+        environmental=result.environmental or None,
+        methodology=result.methodology or None,
+        experience_qualifications=result.experience_qualifications or None,
+        pricing_schedule=result.pricing_schedule or None,
+        extended_sections=result.extended_sections if result.extended_sections else None,
+        unclassified_content=result.unclassified_content or None,
+        extraction_version=result.extraction_version,
+        # Phase 1 extraction enhancements
         document_type=result.document_type,
         province=result.province,
         contract_type=result.contract_type,

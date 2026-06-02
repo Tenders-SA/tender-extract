@@ -69,6 +69,14 @@ class PdfExtractor(BaseExtractor):
     # Section header patterns
     # -------------------------------------------------------------------------
 
+    # Generic header pattern for fallback classification — catches any
+    # uppercase/title-case line that didn't match a known section pattern.
+    GENERIC_HEADER_PATTERN = re.compile(
+        r"^\s*(?:\d+\.?\s*)?"
+        r"([A-Z][A-Za-z\s.'/&,-]{4,}?)\s*:?\s*$",
+        re.MULTILINE,
+    )
+
     DESC_PATTERNS = re.compile(
         r"^\s*(?:\d+\.?\s*)?"
         r"(?:description|scope\s+of\s+(?:work|works|services?|supply|deliverables?)|"
@@ -134,6 +142,103 @@ class PdfExtractor(BaseExtractor):
         r"^\s*(?:\d+\.?\s*)?"
         r"(?:(?:compulsory\s+)?briefing|site\s+(?:visit|inspection)|"
         r"pre-?(?:bid|tender)\s+(?:meeting|conference))\s*:?\s*$",
+        re.MULTILINE | re.IGNORECASE,
+    )
+
+    # -------------------------------------------------------------------------
+    # NEW: Extended taxonomy section patterns (Phase 2)
+    # -------------------------------------------------------------------------
+
+    CONTRACT_PATTERNS = re.compile(
+        r"^\s*(?:\d+\.?\s*)?"
+        r"(?:contract\s+(?:terms?|conditions?|data)\s*"
+        r"|liabilities?\s*"
+        r"|dispute\s+(?:resolution|settlement)\s*"
+        r"|termination|indemnity\s*"
+        r"|insurance\s+(?:requirements?|cover|policy)\s*"
+        r"|warranty|guarantee"
+        r"|contractual\s+obligations?\s*"
+        r"|risk\s+allocation)\s*:?\s*$",
+        re.MULTILINE | re.IGNORECASE,
+    )
+
+    QUALITY_PATTERNS = re.compile(
+        r"^\s*(?:\d+\.?\s*)?"
+        r"(?:quality\s+(?:management|control|assurance|plan)\s*"
+        r"|iso\s*9001\s*"
+        r"|inspection\s+(?:plan|schedule|requirements?)\s*"
+        r"|testing|qa\/?qc\s*"
+        r"|quality\s+procedures?"
+        r"|quality\s+standards?\s*"
+        r"|non-?conformance)\s*:?\s*$",
+        re.MULTILINE | re.IGNORECASE,
+    )
+
+    SAFETY_PATTERNS = re.compile(
+        r"^\s*(?:\d+\.?\s*)?"
+        r"(?:health\s+and\s+safety\s*"
+        r"|occupational\s+health\s*"
+        r"|she\s*(?:management|plan|policy|file)\s*"
+        r"|safety\s+(?:protocols?|requirements?|plan|procedures?)\s*"
+        r"|hazard\s*(?:identification|analysis|assessment)\s*"
+        r"|emergency\s+procedures?\s*"
+        r"|ppe|personal\s+protective\s+equipment"
+        r"|safety\s+specifications?)\s*:?\s*$",
+        re.MULTILINE | re.IGNORECASE,
+    )
+
+    ENVIRONMENTAL_PATTERNS = re.compile(
+        r"^\s*(?:\d+\.?\s*)?"
+        r"(?:environmental\s+(?:impact|assessment|management|plan|policy)\s*"
+        r"|waste\s+management\s*"
+        r"|mitigation\s*"
+        r"|environmental\s+authorisation\s*"
+        r"|eia|environmental\s+impact\s+assessment"
+        r"|environmental\s+compliance\s*"
+        r"|environmental\s+requirements?)\s*:?\s*$",
+        re.MULTILINE | re.IGNORECASE,
+    )
+
+    METHODOLOGY_PATTERNS = re.compile(
+        r"^\s*(?:\d+\.?\s*)?"
+        r"(?:method\s+statement\s*"
+        r"|execution\s+plan\s*"
+        r"|approach\s*"
+        r"|methodology\s*"
+        r"|work\s+plan\s*"
+        r"|implementation\s+(?:plan|strategy)\s*"
+        r"|resourcing\s+plan"
+        r"|technical\s+approach\s*"
+        r"|execution\s+methodology)\s*:?\s*$",
+        re.MULTILINE | re.IGNORECASE,
+    )
+
+    EXPERIENCE_PATTERNS = re.compile(
+        r"^\s*(?:\d+\.?\s*)?"
+        r"(?:experience\s*"
+        r"|past\s+projects?\s*"
+        r"|previous\s+contracts?\s*"
+        r"|similar\s+(?:projects?|works?)\s*"
+        r"|key\s+personnel\s*"
+        r"|qualifications?\s*"
+        r"|company\s+profile\s*"
+        r"|track\s+record"
+        r"|past\s+experience\s*"
+        r"|relevant\s+experience)\s*:?\s*$",
+        re.MULTILINE | re.IGNORECASE,
+    )
+
+    PRICING_PATTERNS = re.compile(
+        r"^\s*(?:\d+\.?\s*)?"
+        r"(?:pricing\s+(?:schedule?|data)\s*"
+        r"|bill\s+of\s+(?:quantities?|materials?)\s*"
+        r"|rate\s+(?:sheet|schedule)\s*"
+        r"|price\s+schedule\s*"
+        r"|cost\s+breakdown\s*"
+        r"|schedule\s+of\s+(?:rates?|prices?)\s*"
+        r"|unit\s+rates?"
+        r"|pricing\s+model\s*"
+        r"|price\s+list)\s*:?\s*$",
         re.MULTILINE | re.IGNORECASE,
     )
 
@@ -522,6 +627,106 @@ class PdfExtractor(BaseExtractor):
     ]
 
     # -------------------------------------------------------------------------
+    # Fallback keyword-scoring classifier (Phase 2)
+    # -------------------------------------------------------------------------
+
+    SECTION_KEYWORDS: dict[str, list[str]] = {
+        "contractual_terms": [
+            "liability", "indemnify", "termination", "dispute",
+            "insurance", "warranty", "guarantee", "breach",
+            "force majeure", "confidentiality", "intellectual property",
+        ],
+        "quality_management": [
+            "iso 9001", "quality plan", "inspection", "qa", "qc",
+            "testing", "quality assurance", "quality control",
+            "non-conformance", "corrective action",
+        ],
+        "health_safety": [
+            "she", "safety", "hazard", "emergency", "ppe",
+            "occupational health", "safety file", "safety plan",
+            "hazard identification", "risk assessment",
+        ],
+        "environmental": [
+            "environmental", "waste", "mitigation", "eia",
+            "impact assessment", "environmental management",
+            "environmental authorisation", "emissions",
+        ],
+        "methodology": [
+            "method statement", "execution plan", "approach",
+            "methodology", "work plan", "implementation plan",
+            "resourcing", "technical approach",
+        ],
+        "experience_qualifications": [
+            "experience", "past projects", "key personnel",
+            "qualifications", "track record", "company profile",
+            "similar projects", "previous contracts",
+        ],
+        "pricing_schedule": [
+            "pricing", "rates", "bill of quantities", "schedule of rates",
+            "price schedule", "cost breakdown", "unit rates",
+            "bill of materials", "pricing model",
+        ],
+    }
+
+    def _classify_content(self, text: str) -> str:
+        """Keyword-score fallback classification.
+
+        Scores text against known section keywords. Returns the best-matching
+        section name, or 'unclassified' if no keywords match.
+        """
+        text_lower = text.lower()
+        best_section = "unclassified"
+        best_score = 0
+
+        for section, keywords in self.SECTION_KEYWORDS.items():
+            score = sum(1 for kw in keywords if kw in text_lower)
+            if score > best_score:
+                best_score = score
+                best_section = section
+
+        return best_section if best_score > 0 else "unclassified"
+
+    def _extract_fallback_sections(
+        self, text: str, known_positions: list[int],
+    ) -> dict[str, str]:
+        """Scan for unrecognized section headers and classify via fallback.
+
+        Finds all lines matching GENERIC_HEADER_PATTERN that were NOT already
+        matched by a known section pattern. Extracts text under each, runs
+        keyword-score classification, and returns a dict of section → text.
+        """
+        header_matches: list[tuple[int, int, str]] = []
+        for match in self.GENERIC_HEADER_PATTERN.finditer(text):
+            start = match.start()
+            end = match.end()
+            # Skip if this position overlaps a known match
+            if any(abs(start - kp) < 5 for kp in known_positions):
+                continue
+            header_matches.append((start, end, match.group(1).strip()))
+
+        if not header_matches:
+            return {}
+
+        header_matches.sort()
+        fallback_sections: dict[str, list[str]] = {}
+
+        for i, (start, end, raw_header) in enumerate(header_matches):
+            next_start = header_matches[i + 1][0] if i + 1 < len(header_matches) else len(text)
+            content = text[end:next_start].strip()
+            if len(content) < 20:
+                continue
+            section = self._classify_content(content)
+            if section not in fallback_sections:
+                fallback_sections[section] = []
+            fallback_sections[section].append(content)
+
+        result: dict[str, str] = {}
+        for section, contents in fallback_sections.items():
+            result[section] = "\n\n".join(contents)
+
+        return result
+
+    # -------------------------------------------------------------------------
     # Public API
     # -------------------------------------------------------------------------
 
@@ -717,6 +922,66 @@ class PdfExtractor(BaseExtractor):
         result.bid_bond_required = self._extract_bid_bond(text)
         result.payment_terms = self._extract_payment_terms(text)
 
+        # --- Phase 2: Extended taxonomy sections ---
+        extended_section_names = [
+            "contractual_terms", "quality_management", "health_safety",
+            "environmental", "methodology", "experience_qualifications",
+            "pricing_schedule",
+        ]
+
+        has_extended = False
+        for name in extended_section_names:
+            section_text = self._section_as_text(sections.get(name))
+            if section_text:
+                setattr(result, name, section_text)
+                has_extended = True
+
+        # Fallback: scan for unrecognized headers and classify via keywords
+        known_positions: list[int] = []
+        all_patterns = {
+            "description": self.DESC_PATTERNS,
+            "requirements": self.REQ_PATTERNS,
+            "bbbee": self.BBBEE_PATTERNS,
+            "evaluation": self.EVAL_PATTERNS,
+            "returnable": self.RETURN_PATTERNS,
+            "special": self.SPECIAL_PATTERNS,
+            "contact": self.CONTACT_PATTERNS,
+            "briefing": self.BRIEFING_PATTERNS,
+            "contractual_terms": self.CONTRACT_PATTERNS,
+            "quality_management": self.QUALITY_PATTERNS,
+            "health_safety": self.SAFETY_PATTERNS,
+            "environmental": self.ENVIRONMENTAL_PATTERNS,
+            "methodology": self.METHODOLOGY_PATTERNS,
+            "experience_qualifications": self.EXPERIENCE_PATTERNS,
+            "pricing_schedule": self.PRICING_PATTERNS,
+        }
+        for name, pattern in all_patterns.items():
+            for match in pattern.finditer(primary_text):
+                known_positions.append(match.start())
+
+        fallback = self._extract_fallback_sections(primary_text, known_positions)
+        unclassified_chunks: list[str] = []
+
+        for section_name, section_text in fallback.items():
+            if section_name == "unclassified":
+                unclassified_chunks.append(section_text)
+            elif section_name in extended_section_names:
+                existing = getattr(result, section_name, "")
+                if existing:
+                    setattr(result, section_name, existing + "\n\n" + section_text)
+                else:
+                    setattr(result, section_name, section_text)
+                has_extended = True
+            else:
+                result.extended_sections[section_name] = section_text
+                has_extended = True
+
+        if unclassified_chunks:
+            result.unclassified_content = "\n\n".join(unclassified_chunks)
+
+        if has_extended:
+            result.extraction_version = 2
+
         return result
 
     # -------------------------------------------------------------------------
@@ -724,7 +989,11 @@ class PdfExtractor(BaseExtractor):
     # -------------------------------------------------------------------------
 
     def _extract_all_sections(self, text: str) -> dict[str, str | list[str]]:
-        """Extract and merge named sections using header positions."""
+        """Extract and merge named sections using header positions.
+
+        Version 2 includes the 7 extended taxonomy patterns alongside the
+        legacy 8. Extended sections are stored as plain strings.
+        """
         patterns = {
             "description": self.DESC_PATTERNS,
             "requirements": self.REQ_PATTERNS,
@@ -734,6 +1003,14 @@ class PdfExtractor(BaseExtractor):
             "special": self.SPECIAL_PATTERNS,
             "contact": self.CONTACT_PATTERNS,
             "briefing": self.BRIEFING_PATTERNS,
+            # Extended taxonomy (Phase 2)
+            "contractual_terms": self.CONTRACT_PATTERNS,
+            "quality_management": self.QUALITY_PATTERNS,
+            "health_safety": self.SAFETY_PATTERNS,
+            "environmental": self.ENVIRONMENTAL_PATTERNS,
+            "methodology": self.METHODOLOGY_PATTERNS,
+            "experience_qualifications": self.EXPERIENCE_PATTERNS,
+            "pricing_schedule": self.PRICING_PATTERNS,
         }
 
         matches: list[tuple[int, int, str]] = []
