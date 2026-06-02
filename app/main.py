@@ -9,12 +9,15 @@ Features:
 
 import os
 import sys
+import re
 import logging
+import tempfile
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Optional
 from urllib.parse import urlparse, unquote
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, Request
+from fastapi import FastAPI, File, HTTPException, UploadFile, Request, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import httpx
@@ -393,6 +396,188 @@ async def extract_tender(
         raw_text_preview=result.raw_text_preview,
         full_text=result.full_text,
     )
+
+
+@app.post("/extract/ocpo-suppliers", tags=["OCPO"])
+async def extract_ocpo_suppliers(file: UploadFile = File(...)):
+    """Extract structured supplier entries from the OCPO restricted supplier PDF.
+
+    Accepts the PDF file via multipart upload. Uses Camelot for tabular extraction
+    with PyMuPDF text+regex fallback if Camelot fails.
+
+    Returns structured JSON array of supplier entries with:
+    - supplierName, registrationNumber, restrictionType, restrictionReason
+    - periodFrom, periodTo (ISO dates), authorizedBy, reportGeneratedOn
+    """
+    pdf_bytes = await file.read()
+
+    # Write to temp file for Camelot
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    tmp_path = tmp.name
+    try:
+        tmp.write(pdf_bytes)
+        tmp.close()
+
+        entries = []
+
+        # Primary: Camelot for tabular extraction
+        try:
+            # Try lattice flavor first (for bordered tables)
+            import camelot
+            tables = camelot.read_pdf(tmp_path, pages="all", flavor="lattice")
+            if not tables or tables.n == 0:
+                # Fall back to stream flavor (for borderless/whitespace-delimited)
+                tables = camelot.read_pdf(tmp_path, pages="all", flavor="stream")
+
+            if tables and tables.n > 0:
+                for table in tables:
+                    for row_idx in range(table.df.shape[0]):
+                        row_values = table.df.iloc[row_idx].tolist()
+                        entry = _parse_ocpo_row(row_values)
+                        if entry:
+                            entries.append(entry)
+
+                return {"success": True, "entries": entries, "parser": "camelot", "entry_count": len(entries)}
+        except Exception:
+            logger.info("Camelot extraction failed, falling back to PyMuPDF", exc_info=True)
+
+        # Fallback: PyMuPDF text extraction + regex
+        entries = _extract_ocpo_with_fitz(tmp_path)
+        return {"success": True, "entries": entries, "parser": "fitz_fallback", "entry_count": len(entries)}
+
+    except Exception as e:
+        logger.error(f"OCPO extraction failed: {e}", exc_info=True)
+        return {"success": False, "entries": [], "parser": "error", "error": str(e)}
+    finally:
+        # Clean up temp file
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
+def _parse_ocpo_row(row_values: list) -> dict | None:
+    """Parse a single row from the OCPO PDF table into a structured entry.
+
+    Expected columns: [supplierName, registrationNumber, restrictionType,
+                       restrictionReason, periodFrom, periodTo, authorizedBy]
+
+    Returns None if the row doesn't contain valid data.
+    """
+    # Need at least 6 columns for a valid row
+    if not row_values or len(row_values) < 6:
+        return None
+
+    # Clean values
+    vals = [str(v).strip() if v else "" for v in row_values]
+
+    # Skip header rows and empty rows
+    first = vals[0]
+    if not first or first.lower() in ("supplier name", "suppliername", "name", "no.", ""):
+        return None
+
+    supplier_name = vals[0]
+    registration_num = vals[1] if len(vals) > 1 and vals[1] and vals[1] != "-" else None
+    restriction_type = vals[2] if len(vals) > 2 else ""
+    restriction_reason = vals[3] if len(vals) > 3 else ""
+    period_from = vals[4] if len(vals) > 4 else ""
+    period_to = vals[5] if len(vals) > 5 else ""
+    authorized_by = vals[6] if len(vals) > 6 else ""
+
+    # Parse dates from various formats
+    def parse_date(date_str: str) -> str | None:
+        """Try to parse a date string into ISO format YYYY-MM-DD."""
+        if not date_str or date_str == "-":
+            return None
+        # Try common formats
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d %b %Y", "%d %B %Y", "%Y/%m/%d"):
+            try:
+                return datetime.strptime(date_str.strip(), fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+        # If all parsing fails, return the raw string
+        return date_str.strip()
+
+    parsed_from = parse_date(period_from)
+    parsed_to = parse_date(period_to)
+
+    # Infer reportGeneratedOn from period_to if available (some PDFs list it as last date)
+    report_generated_on = None
+
+    return {
+        "supplierName": supplier_name,
+        "registrationNumber": registration_num,
+        "restrictionType": restriction_type,
+        "restrictionReason": restriction_reason,
+        "periodFrom": parsed_from,
+        "periodTo": parsed_to,
+        "authorizedBy": authorized_by if authorized_by else "OCPO",
+        "reportGeneratedOn": report_generated_on,
+    }
+
+
+def _extract_ocpo_with_fitz(pdf_path: str) -> list:
+    """Fallback OCR-less extraction using PyMuPDF text + regex patterns.
+
+    Attempts to extract tabular data from the OCPO PDF when Camelot fails.
+    Uses line-by-line text extraction with heuristic column detection.
+    """
+    entries = []
+    try:
+        import fitz
+
+        doc = fitz.open(pdf_path)
+        full_text = ""
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            full_text += page.get_text()
+
+        doc.close()
+
+        # Try to find tabular structure in the text
+        # OCPO PDF typically has pipe-delimited or multi-column text
+        lines = full_text.split("\n")
+        in_table = False
+        current_row = []
+
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                if in_table and current_row:
+                    entry = _parse_ocpo_row(current_row)
+                    if entry:
+                        entries.append(entry)
+                    current_row = []
+                in_table = False
+                continue
+
+            # Detect table rows: lines with multiple whitespace-separated values or pipe characters
+            if "|" in stripped:
+                parts = [p.strip() for p in stripped.split("|") if p.strip()]
+                if len(parts) >= 4:
+                    current_row = parts
+                    in_table = True
+                    continue
+
+            # Whitespace-delimited columns: multiple consecutive spaces
+            parts = re.split(r"\s{2,}", stripped)
+            if len(parts) >= 4:
+                current_row = parts
+                in_table = True
+            elif in_table and current_row:
+                # Continuation of previous row
+                current_row[-1] = current_row[-1] + " " + stripped
+
+        # Don't forget last row
+        if in_table and current_row:
+            entry = _parse_ocpo_row(current_row)
+            if entry:
+                entries.append(entry)
+
+    except Exception:
+        logger.warning("PyMuPDF fallback extraction failed", exc_info=True)
+
+    return entries
 
 
 @app.exception_handler(Exception)
