@@ -57,7 +57,22 @@ ALLOWED_URL_HOSTS = {
     ).split(",")
     if host.strip()
 }
+from urllib.parse import urlparse, urlunparse
 
+def normalize(url: str) -> str | None:
+    try:
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url  # or reject, depending on strictness
+
+        parsed = urlparse(url)
+
+        if not parsed.hostname:
+            return None
+
+        return urlunparse(parsed)
+    except Exception:
+        return None
+    
 def _is_allowed_url(url: str) -> bool:
     """Allow only trusted HTTP(S) document sources."""
     try:
