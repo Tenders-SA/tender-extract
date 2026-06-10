@@ -443,9 +443,17 @@ async def extract_ocpo_suppliers(file: UploadFile = File(...)):
 
             if tables and tables.n > 0:
                 for table in tables:
+                    col_map = None
                     for row_idx in range(table.df.shape[0]):
                         row_values = table.df.iloc[row_idx].tolist()
-                        entry = _parse_ocpo_row(row_values)
+
+                        if col_map is None:
+                            col_map = _detect_column_map(row_values)
+                            if col_map:
+                                logger.info(f"Detected OCPO column map: {col_map}")
+                                continue
+
+                        entry = _parse_ocpo_row(row_values, col_map)
                         if entry:
                             entries.append(entry)
 
@@ -468,64 +476,124 @@ async def extract_ocpo_suppliers(file: UploadFile = File(...)):
             pass
 
 
-def _parse_ocpo_row(row_values: list) -> dict | None:
+def _parse_ocpo_row(row_values: list, col_map: dict | None = None) -> dict | None:
     """Parse a single row from the OCPO PDF table into a structured entry.
 
-    Expected columns: [supplierName, registrationNumber, restrictionType,
-                       restrictionReason, periodFrom, periodTo, authorizedBy]
+    Supports two modes:
+      - col_map provided: use explicit column index mapping (auto-detected from header).
+      - col_map=None: fall back to positional heuristic (legacy 7-column layout).
 
     Returns None if the row doesn't contain valid data.
     """
-    # Need at least 6 columns for a valid row
-    if not row_values or len(row_values) < 6:
+    if not row_values or len(row_values) < 4:
         return None
 
-    # Clean values
     vals = [str(v).strip() if v else "" for v in row_values]
 
-    # Skip header rows and empty rows
     first = vals[0]
-    if not first or first.lower() in ("supplier name", "suppliername", "name", "no.", ""):
+    if not first:
         return None
 
-    supplier_name = vals[0]
-    registration_num = vals[1] if len(vals) > 1 and vals[1] and vals[1] != "-" else None
-    restriction_type = vals[2] if len(vals) > 2 else ""
-    restriction_reason = vals[3] if len(vals) > 3 else ""
-    period_from = vals[4] if len(vals) > 4 else ""
-    period_to = vals[5] if len(vals) > 5 else ""
-    authorized_by = vals[6] if len(vals) > 6 else ""
+    first_lower = first.lower().strip(". ")
 
-    # Parse dates from various formats
+    header_indicators = {
+        "supplier name", "suppliername", "name", "no.", "no", "#",
+        "nr", "nr.", "num", "num.", "number", "s/n", "seq",
+        "restricted supplier", "supplier", "entity",
+    }
+    if first_lower in header_indicators:
+        return None
+
+    if all(not v or v == "-" for v in vals):
+        return None
+
+    def get_col(key: str, fallback_idx: int) -> str:
+        if col_map and key in col_map:
+            idx = col_map[key]
+            if idx < len(vals):
+                return vals[idx]
+        if fallback_idx < len(vals):
+            return vals[fallback_idx]
+        return ""
+
+    supplier_name = get_col("supplier_name", 0)
+    registration_num = get_col("registration_number", 1)
+    restriction_type = get_col("restriction_type", 2)
+    restriction_reason = get_col("restriction_reason", 3)
+    period_from = get_col("period_from", 4)
+    period_to = get_col("period_to", 5)
+    authorized_by = get_col("authorized_by", 6)
+
+    if not supplier_name or len(supplier_name) < 2:
+        return None
+
+    if not restriction_type and not restriction_reason:
+        return None
+
     def parse_date(date_str: str) -> str | None:
-        """Try to parse a date string into ISO format YYYY-MM-DD."""
         if not date_str or date_str == "-":
             return None
-        # Try common formats
-        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d %b %Y", "%d %B %Y", "%Y/%m/%d"):
+        date_str = date_str.strip()
+        for fmt in (
+            "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y",
+            "%d %b %Y", "%d %B %Y", "%Y/%m/%d",
+            "%d-%b-%Y", "%d-%B-%Y", "%Y.%m.%d",
+            "%d.%m.%Y",
+        ):
             try:
-                return datetime.strptime(date_str.strip(), fmt).strftime("%Y-%m-%d")
+                return datetime.strptime(date_str, fmt).strftime("%Y-%m-%d")
             except ValueError:
                 continue
-        # If all parsing fails, return the raw string
-        return date_str.strip()
+        return date_str
 
     parsed_from = parse_date(period_from)
     parsed_to = parse_date(period_to)
 
-    # Infer reportGeneratedOn from period_to if available (some PDFs list it as last date)
-    report_generated_on = None
-
     return {
         "supplierName": supplier_name,
-        "registrationNumber": registration_num,
-        "restrictionType": restriction_type,
-        "restrictionReason": restriction_reason,
+        "registrationNumber": registration_num if registration_num and registration_num != "-" else None,
+        "restrictionType": restriction_type or "Restricted",
+        "restrictionReason": restriction_reason or "Not specified",
         "periodFrom": parsed_from,
         "periodTo": parsed_to,
         "authorizedBy": authorized_by if authorized_by else "OCPO",
-        "reportGeneratedOn": report_generated_on,
+        "reportGeneratedOn": None,
     }
+
+
+def _detect_column_map(header_row: list) -> dict | None:
+    """Detect column mapping from a header row.
+
+    Returns a dict like {"supplier_name": 1, "registration_number": 2, ...}
+    or None if the header cannot be reliably mapped.
+    """
+    if not header_row:
+        return None
+
+    vals = [str(v).strip().lower().strip(".") for v in header_row if v]
+
+    col_map = {}
+    patterns = {
+        "supplier_name": ["supplier name", "suppliername", "supplier", "name", "entity", "company name", "company"],
+        "registration_number": ["registration number", "reg number", "reg no", "reg.no", "registration no",
+                                "company reg", "entity reg", "company registration"],
+        "restriction_type": ["restriction type", "type", "category", "status", "classification"],
+        "restriction_reason": ["restriction reason", "reason", "grounds", "description", "details"],
+        "period_from": ["period from", "from date", "start date", "date from", "from"],
+        "period_to": ["period to", "to date", "end date", "date to", "to", "expiry"],
+        "authorized_by": ["authorized by", "authorised by", "authority", "issued by", "approved by"],
+    }
+
+    for col_key, keywords in patterns.items():
+        for idx, val in enumerate(vals):
+            val_clean = val.strip().lower()
+            if val_clean in keywords:
+                col_map[col_key] = idx
+                break
+
+    if "supplier_name" in col_map:
+        return col_map
+    return None
 
 
 def _extract_ocpo_with_fitz(pdf_path: str) -> list:
@@ -546,43 +614,52 @@ def _extract_ocpo_with_fitz(pdf_path: str) -> list:
 
         doc.close()
 
-        # Try to find tabular structure in the text
-        # OCPO PDF typically has pipe-delimited or multi-column text
         lines = full_text.split("\n")
         in_table = False
         current_row = []
+        col_map = None
 
         for line in lines:
             stripped = line.strip()
             if not stripped:
                 if in_table and current_row:
-                    entry = _parse_ocpo_row(current_row)
+                    entry = _parse_ocpo_row(current_row, col_map)
                     if entry:
                         entries.append(entry)
                     current_row = []
                 in_table = False
                 continue
 
-            # Detect table rows: lines with multiple whitespace-separated values or pipe characters
             if "|" in stripped:
                 parts = [p.strip() for p in stripped.split("|") if p.strip()]
                 if len(parts) >= 4:
+                    if col_map is None:
+                        detected = _detect_column_map(parts)
+                        if detected:
+                            col_map = detected
+                            logger.info(f"Fitz detected column map: {col_map}")
+                            in_table = True
+                            continue
                     current_row = parts
                     in_table = True
                     continue
 
-            # Whitespace-delimited columns: multiple consecutive spaces
             parts = re.split(r"\s{2,}", stripped)
             if len(parts) >= 4:
+                if col_map is None:
+                    detected = _detect_column_map(parts)
+                    if detected:
+                        col_map = detected
+                        logger.info(f"Fitz detected column map: {col_map}")
+                        in_table = True
+                        continue
                 current_row = parts
                 in_table = True
             elif in_table and current_row:
-                # Continuation of previous row
                 current_row[-1] = current_row[-1] + " " + stripped
 
-        # Don't forget last row
         if in_table and current_row:
-            entry = _parse_ocpo_row(current_row)
+            entry = _parse_ocpo_row(current_row, col_map)
             if entry:
                 entries.append(entry)
 
