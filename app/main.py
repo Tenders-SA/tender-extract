@@ -10,6 +10,7 @@ Features:
 import os
 import sys
 import re
+import hashlib
 import logging
 import tempfile
 from contextlib import asynccontextmanager
@@ -56,6 +57,8 @@ ALLOWED_URL_HOSTS = {
             "docs.tenders-sa.org",
             "www.etenders.gov.za",
             "etenders.gov.za",
+            "ocpo.treasury.gov.za",
+            "secure.csd.gov.za",
         ])
     ).split(",")
     if host.strip()
@@ -411,17 +414,50 @@ async def extract_tender(
 
 
 @app.post("/extract/ocpo-suppliers", tags=["OCPO"])
-async def extract_ocpo_suppliers(file: UploadFile = File(...)):
+async def extract_ocpo_suppliers(
+    request: Request,
+    file: Optional[UploadFile] = File(None),
+):
     """Extract structured supplier entries from the OCPO restricted supplier PDF.
 
-    Accepts the PDF file via multipart upload. Uses Camelot for tabular extraction
-    with PyMuPDF text+regex fallback if Camelot fails.
+    Accepts either:
+      - A PDF file via multipart upload (backward compatible)
+      - A JSON body with `url` and optional `lastPdfHash`:
+          { "url": "https://...", "lastPdfHash": "abc123..." }
 
-    Returns structured JSON array of supplier entries with:
-    - supplierName, registrationNumber, restrictionType, restrictionReason
-    - periodFrom, periodTo (ISO dates), authorizedBy, reportGeneratedOn
+    When `url` is provided, this service downloads the PDF itself.
+    When `lastPdfHash` is provided and matches the downloaded PDF's hash,
+    extraction is skipped and `{ success: true, changed: false, pdf_hash }` is returned.
+
+    Returns structured entries with pdf_hash, parser metadata.
     """
-    pdf_bytes = await file.read()
+    pdf_bytes: bytes | None = None
+
+    # Determine source: file upload or URL
+    if file is not None:
+        pdf_bytes = await file.read()
+    else:
+        try:
+            body = await request.json()
+            url = body.get("url") if isinstance(body, dict) else None
+            if not url:
+                raise HTTPException(status_code=422, detail="Provide either a file upload or a 'url' field in the request body")
+            last_pdf_hash = body.get("lastPdfHash") if isinstance(body, dict) else None
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=422, detail="Provide either a file upload or a 'url' field in the request body")
+
+        pdf_bytes = await _fetch_document_from_url(url)
+
+        # Compute hash before extraction — allows early skip if PDF unchanged
+        current_hash = hashlib.sha256(pdf_bytes).hexdigest()
+        if last_pdf_hash and last_pdf_hash == current_hash:
+            logger.info("ocpo_pdf_unchanged", {"pdf_hash": current_hash})
+            return {"success": True, "changed": False, "pdf_hash": current_hash}
+
+    # Compute hash for file upload path too
+    current_hash = hashlib.sha256(pdf_bytes).hexdigest()
 
     # Write to temp file for Camelot
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
@@ -434,11 +470,9 @@ async def extract_ocpo_suppliers(file: UploadFile = File(...)):
 
         # Primary: Camelot for tabular extraction
         try:
-            # Try lattice flavor first (for bordered tables)
             import camelot
             tables = camelot.read_pdf(tmp_path, pages="all", flavor="lattice")
             if not tables or tables.n == 0:
-                # Fall back to stream flavor (for borderless/whitespace-delimited)
                 tables = camelot.read_pdf(tmp_path, pages="all", flavor="stream")
 
             if tables and tables.n > 0:
@@ -457,19 +491,32 @@ async def extract_ocpo_suppliers(file: UploadFile = File(...)):
                         if entry:
                             entries.append(entry)
 
-                return {"success": True, "entries": entries, "parser": "camelot", "entry_count": len(entries)}
+                return {
+                    "success": True,
+                    "changed": True,
+                    "entries": entries,
+                    "parser": "camelot",
+                    "entry_count": len(entries),
+                    "pdf_hash": current_hash,
+                }
         except Exception:
             logger.info("Camelot extraction failed, falling back to PyMuPDF", exc_info=True)
 
         # Fallback: PyMuPDF text extraction + regex
         entries = _extract_ocpo_with_fitz(tmp_path)
-        return {"success": True, "entries": entries, "parser": "fitz_fallback", "entry_count": len(entries)}
+        return {
+            "success": True,
+            "changed": True,
+            "entries": entries,
+            "parser": "fitz_fallback",
+            "entry_count": len(entries),
+            "pdf_hash": current_hash,
+        }
 
     except Exception as e:
         logger.error(f"OCPO extraction failed: {e}", exc_info=True)
-        return {"success": False, "entries": [], "parser": "error", "error": str(e)}
+        return {"success": False, "entries": [], "parser": "error", "error": str(e), "pdf_hash": current_hash}
     finally:
-        # Clean up temp file
         try:
             os.unlink(tmp_path)
         except Exception:
