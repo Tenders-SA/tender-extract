@@ -48,21 +48,25 @@ MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE_BYTES", str(100 * 1024 * 1024)))  #
 URL_FETCH_TIMEOUT = float(os.getenv("URL_FETCH_TIMEOUT_SECONDS", "90.0"))
 MAX_REDIRECTS = int(os.getenv("URL_FETCH_MAX_REDIRECTS", "5"))
 
-ALLOWED_URL_HOSTS = {
-    host.strip().lower()
-    for host in os.getenv(
-        "ALLOWED_URL_HOSTS",
-        ",".join([
-            "etenders-api.tenders-sa.org",
-            "docs.tenders-sa.org",
-            "www.etenders.gov.za",
-            "etenders.gov.za",
-            "ocpo.treasury.gov.za",
-            "secure.csd.gov.za",
-        ])
-    ).split(",")
-    if host.strip()
+CORE_ALLOWED_HOSTS: set[str] = {
+    "etenders-api.tenders-sa.org",
+    "docs.tenders-sa.org",
+    "www.etenders.gov.za",
+    "etenders.gov.za",
+    "ocpo.treasury.gov.za",
+    "secure.csd.gov.za",
+    "localhost",
+    "127.0.0.1",
+    "0.0.0.0",
 }
+
+env_hosts_raw = os.getenv("ALLOWED_URL_HOSTS", "").strip()
+if env_hosts_raw:
+    env_hosts = {h.strip().lower() for h in env_hosts_raw.split(",") if h.strip()}
+    ALLOWED_URL_HOSTS = CORE_ALLOWED_HOSTS | env_hosts
+    logger.info("url_allowlist_init", {"core_hosts": list(CORE_ALLOWED_HOSTS), "env_added": list(env_hosts - CORE_ALLOWED_HOSTS)})
+else:
+    ALLOWED_URL_HOSTS = CORE_ALLOWED_HOSTS
 from urllib.parse import urlparse, urlunparse
 
 def normalize(url: str) -> str | None:
@@ -102,10 +106,6 @@ def _is_allowed_url(url: str) -> bool:
 
     # Allow subdomains of docs.tenders-sa.org (e.g. service-1.docs.tenders-sa.org)
     if hostname == "docs.tenders-sa.org" or hostname.endswith(".docs.tenders-sa.org"):
-        return True
-
-    # Allow localhost for development/testing
-    if hostname in {"localhost", "127.0.0.1", "0.0.0.0"}:
         return True
 
     return False
