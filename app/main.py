@@ -413,7 +413,7 @@ async def extract_tender(
     )
 
 
-@app.post("/extract/ocpo-suppliers", tags=["OCPO"])
+@app.post("/v1/extract/ocpo-suppliers", tags=["OCPO"])
 async def extract_ocpo_suppliers(
     request: Request,
     file: Optional[UploadFile] = File(None),
