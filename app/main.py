@@ -55,9 +55,6 @@ CORE_ALLOWED_HOSTS: set[str] = {
     "etenders.gov.za",
     "ocpo.treasury.gov.za",
     "secure.csd.gov.za",
-    "localhost",
-    "127.0.0.1",
-    "0.0.0.0",
 }
 
 env_hosts_raw = os.getenv("ALLOWED_URL_HOSTS", "").strip()
